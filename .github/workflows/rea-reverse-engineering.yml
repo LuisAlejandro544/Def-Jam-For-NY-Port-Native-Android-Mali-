@@ -242,6 +242,12 @@ jobs:
           restore-keys: |
             defjam-iso-
 
+      - name: Instalar capstone Python
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install capstone pyelftools
+
       - name: Descargar artefacto .xbe (si existe)
         uses: actions/download-artifact@v4
         with:
