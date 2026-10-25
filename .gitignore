@@ -12,7 +12,9 @@ DefJamFFNY/
 # Android build outputs & binaries
 *.apk
 *.aab
+*.idsig
 build/
+android-port/build/
 .gradle/
 local.properties
 /tmp/
