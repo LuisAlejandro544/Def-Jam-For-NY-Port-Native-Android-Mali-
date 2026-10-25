@@ -82,8 +82,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install capstone pyelftools
           sudo apt-get update -qq
-          sudo apt-get install -y -qq p7zip-full 7zip 2>/dev/null || true
-
+          sudo apt-get install -y -qq p7zip-full p7zip-rar 7zip unrar unrar-free unar unzip 2>/dev/null || true
       - name: Verificar toolchain
         run: |
           python3 -c "import capstone; print('capstone', capstone.__version__)"
@@ -141,19 +140,41 @@ jobs:
           fi
           echo "ISO_PATH=$OUT" >> "$GITHUB_ENV"
 
-      - name: Extraer .xbe de la ISO/XISO
+      - name: Instalar extractores (rar/zip/7z)
         run: |
           set -euo pipefail
-          mkdir -p work/iso-extract
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full p7zip-rar 7zip unrar unrar-free unar unzip 2>/dev/null || true
+
+      - name: Extraer .xbe de la ISO/XISO
+        run: |
+          set -euo pipefail          mkdir -p work/iso-extract
           ISO=$(ls ~/.cache/defjam-iso/* 2>/dev/null | head -1)
           echo "ISO encontrada: $ISO"
           if [ -z "$ISO" ]; then
             echo "No hay ISO en caché; saltando extracción."
             exit 0
           fi
-          # Intento 1: 7z
-          7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
-          # Buscar .xbe
+          # Descompresión: soporta ISO/XISO y también archivos RAR (mediafire)
+          if [[ "${ISO,,}" == *.rar ]]; then
+            if command -v unrar >/dev/null 2>&1; then
+              unrar x -o+ "$ISO" work/iso-extract/ 2>&1 | tail -20 || 7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+            else
+              7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+            fi
+          else
+            7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+          fi
+          # Si el rar/zip contiene archivos anidados, extraerlos también
+          find work/iso-extract -type f \( -iname "*.rar" -o -iname "*.zip" -o -iname "*.7z" \) -print0 | while IFS= read -r -d '' nested; do
+            dir="$(dirname "$nested")/$(basename "$nested" | sed 's/\.[^.]*$//')"
+            mkdir -p "$dir"
+            if [[ "${nested,,}" == *.rar ]]; then
+              if command -v unrar >/dev/null 2>&1; then unrar x -o+ "$nested" "$dir/" || 7z x -y "$nested" "-o$dir"; else 7z x -y "$nested" "-o$dir"; fi
+            else
+              7z x -y "$nested" "-o$dir" || true
+            fi
+          done          # Buscar .xbe
           XBE=$(find work/iso-extract -iname "*.xbe" | head -1)
           if [ -z "$XBE" ]; then
             echo "No se encontró .xbe con 7z; intentando extract-xiso si existe."
