@@ -222,12 +222,22 @@ jobs:
         continue-on-error: true
         run: node scripts/ci/rea-mcp-filter.mjs --self-test
 
+      - name: Instalar herramientas de extracción (zip/rar/7z/tar)
+        if: steps.dedupe.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full p7zip-rar 7zip unrar unrar-free unar unzip 2>/dev/null || true
+          command -v 7z || true
+          command -v unrar || true
+          command -v unar || true
+
       - name: Resolver Prompt y Descargar Imágenes para OpenCode Multimodal
         id: prompt_resolver
         if: steps.dedupe.outputs.skip != 'true'
         shell: python3 {0}
         run: |
-          import os, re, urllib.request, mimetypes
+          import os, re, urllib.request, urllib.parse, mimetypes, subprocess
 
           event_name = os.environ.get("EVENT_NAME", "")
           issue_title = os.environ.get("ISSUE_TITLE", "")
@@ -281,6 +291,90 @@ jobs:
                   except Exception as e:
                       print(f"⚠️ No se pudo descargar la imagen {url}: {e}")
 
+          archive_exts = (".rar", ".zip", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz")
+          all_urls = re.findall(r'https?://\S+', raw_prompt)
+          all_urls = [u.rstrip(".,;:!?") for u in all_urls]
+          archive_urls = []
+          for u in all_urls:
+              low = u.lower()
+              is_archive = any(low.split("?")[0].endswith(ext) for ext in archive_exts)
+              is_mediafire = "mediafire.com" in low
+              if (is_archive or is_mediafire) and u not in archive_urls:
+                  archive_urls.append(u)
+
+          def resolve_mediafire(url):
+              if "mediafire.com" not in url.lower():
+                  return url
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      html = resp.read().decode("utf-8", "ignore")
+                  m = re.search(r"https://download[0-9]*\.mediafire\.com/[^\s\"'<>]+", html)
+                  if m:
+                      return m.group(0)
+                  m = re.search(r'href="(https://[^"]*mediafire.com[^"]*)"', html, re.IGNORECASE)
+                  if m:
+                      return m.group(1)
+              except Exception as e:
+                  print(f"⚠️ No se pudo resolver Mediafire {url}: {e}")
+              return url
+
+          downloaded_archives = []
+          if archive_urls:
+              os.makedirs(".opencode/attachments", exist_ok=True)
+              for idx, url in enumerate(archive_urls, 1):
+                  try:
+                      dl_url = resolve_mediafire(url)
+                      req = urllib.request.Request(dl_url, headers={"User-Agent": "Mozilla/5.0"})
+                      with urllib.request.urlopen(req, timeout=120) as resp:
+                          data = resp.read()
+                          cd = resp.headers.get("Content-Disposition", "")
+                          filename = None
+                          m = re.search(r'filename="?([^";]+)"?', cd)
+                          if m:
+                              filename = m.group(1).strip()
+                          if not filename:
+                              filename = os.path.basename(urllib.parse.urlparse(dl_url).path) or f"archivo_{idx}"
+                          if not os.path.splitext(filename)[1]:
+                              if data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+                                  filename += ".zip"
+                              elif data[:6] == b"Rar!\x1a\x07":
+                                  filename += ".rar"
+                              elif data[:6] == b"7z\xbc\xaf\x27\x1c":
+                                  filename += ".7z"
+                              else:
+                                  filename += ".rar"
+                          safe_name = re.sub(r'[^A-Za-z0-9._-]', "_", filename)
+                          local_path = f".opencode/attachments/archivo_{idx}_{safe_name}"
+                          with open(local_path, "wb") as f:
+                              f.write(data)
+                          extract_dir = f".opencode/attachments/extraido_{idx}"
+                          os.makedirs(extract_dir, exist_ok=True)
+                          extracted = False
+                          cmds = [
+                              ["7z", "x", "-y", local_path, f"-o{extract_dir}"],
+                              ["unrar", "x", "-o+", local_path, extract_dir + "/"],
+                              ["unar", "-o", extract_dir, local_path],
+                              ["unzip", "-o", local_path, "-d", extract_dir],
+                          ]
+                          for cmd in cmds:
+                              try:
+                                  subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                  extracted = True
+                                  break
+                              except Exception:
+                                  continue
+                          if not extracted:
+                              try:
+                                  subprocess.run(["7z", "x", "-y", local_path, f"-o{extract_dir}"], check=True)
+                                  extracted = True
+                              except Exception:
+                                  pass
+                          downloaded_archives.append((local_path, extract_dir, url, extracted))
+                          print(f"✅ Archivo {idx} descargado: {local_path} ({len(data)} bytes) extraído={extracted} -> {extract_dir}")
+                  except Exception as e:
+                      print(f"⚠️ No se pudo descargar/extraer el archivo {url}: {e}")
+
           final_prompt = raw_prompt
           if downloaded_images:
               final_prompt += "\n\n---\n📸 [IMÁGENES / CAPTURAS ADJUNTAS DISPONIBLES LOCALMENTE]:\n"
@@ -288,6 +382,13 @@ jobs:
               for path, url in downloaded_images:
                   final_prompt += f"- Archivo local: `{path}` (URL original: {url})\n"
               final_prompt += "\nPor favor, utiliza tus herramientas de lectura y capacidades multimodales para revisar los archivos de imagen adjuntos, extraer detalles visuales, layouts o mensajes de error, y tenerlos en cuenta en tu respuesta e implementación de código.\n---"
+
+          if downloaded_archives:
+              final_prompt += "\n\n---\n📦 [ARCHIVOS DESCARGADOS Y DESCOMPRIMIDOS (incluye RAR)]:\n"
+              final_prompt += "Se descargaron y descomprimieron (cuando fue posible) los siguientes archivos (rar/zip/7z/tar), incluyendo enlaces de Mediafire. Usa `7z`/`unrar` si necesitas extraer manualmente:\n"
+              for local_path, extract_dir, url, extracted in downloaded_archives:
+                  final_prompt += f"- Archivo: `{local_path}` (URL: {url}) extraído={extracted} -> directorio: `{extract_dir}`\n"
+              final_prompt += "\nExplora los directorios extraídos para modificar el port de Def Jam Fight for NY.\n---"
 
           github_output = os.environ.get("GITHUB_OUTPUT")
           if github_output:
