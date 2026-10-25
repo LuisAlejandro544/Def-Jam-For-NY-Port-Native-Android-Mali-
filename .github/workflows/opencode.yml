@@ -305,6 +305,20 @@ jobs:
           def resolve_mediafire(url):
               if "mediafire.com" not in url.lower():
                   return url
+              # 1) Resolver via lector Jina (evita Cloudflare)
+              try:
+                  req = urllib.request.Request(
+                      "https://r.jina.ai/" + url,
+                      headers={"User-Agent": "Mozilla/5.0", "Accept": "text/plain"},
+                  )
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      text = resp.read().decode("utf-8", "ignore")
+                  m = re.search(r"https://download[0-9]*\.mediafire\.com/[^\s\"'<>\)]+", text)
+                  if m:
+                      return m.group(0).rstrip(")]")
+              except Exception as e:
+                  print(f"⚠️ Jina no pudo resolver Mediafire {url}: {e}")
+              # 2) Intento directo (legacy)
               try:
                   req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                   with urllib.request.urlopen(req, timeout=30) as resp:
@@ -312,9 +326,6 @@ jobs:
                   m = re.search(r"https://download[0-9]*\.mediafire\.com/[^\s\"'<>]+", html)
                   if m:
                       return m.group(0)
-                  m = re.search(r'href="(https://[^"]*mediafire.com[^"]*)"', html, re.IGNORECASE)
-                  if m:
-                      return m.group(1)
               except Exception as e:
                   print(f"⚠️ No se pudo resolver Mediafire {url}: {e}")
               return url
