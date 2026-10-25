@@ -1,0 +1,23 @@
+# Game data and ROM files (do NOT commit 2GB+ copyrighted Xbox dumps)
+Def Jam Fight For Droidport*/
+DefJamFFNY/
+*.zip
+*.iso
+*.xbe
+*.viv
+*.vp6
+*.wav
+*.vag
+
+# Android build outputs & binaries
+*.apk
+*.aab
+build/
+.gradle/
+local.properties
+/tmp/
+
+# Crash logs and runtime files
+*.log
+settings.ini
+defjam-native.log
