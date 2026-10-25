@@ -6,7 +6,12 @@ Uso: extract_xbe_capstone.py <ruta.xbe> <dir_salida>
 import os
 import sys
 
-from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+try:
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+except ModuleNotFoundError:
+    import subprocess, sys as _sys
+    subprocess.check_call([_sys.executable, "-m", "pip", "install", "--quiet", "capstone"])
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 
 
 def main():
