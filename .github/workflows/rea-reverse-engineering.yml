@@ -1,0 +1,258 @@
+name: REA — Ingeniería inversa (manual) — Def Jam Fight for NY (Xbox)
+
+# Fase 1: conectar toolchain (Ghidra + capstone) + ISO cacheada + extracción .xbe.
+# Disparo manual: gh workflow run rea-reverse-engineering.yml -f modo=full
+# o: scripts/ci/dispatch-rea.sh
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Modo de ejecución"
+        required: true
+        default: "full"
+        type: choice
+        options: [full, tools-only, iso-only, analyze-only]
+      iso_url:
+        description: "URL de la ISO/XISO de Xbox (vacío = secret ISO_URL o caché)"
+        required: false
+        default: ""
+        type: string
+      iso_sha256:
+        description: "SHA-256 esperado de la ISO (opcional)"
+        required: false
+        default: ""
+        type: string
+      ghidra_version:
+        description: "Versión de Ghidra"
+        required: false
+        default: "12.1.4"
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  GHIDRA_VERSION: ${{ github.event.inputs.ghidra_version || '12.1.4' }}
+  ISO_URL: ${{ github.event.inputs.iso_url || '' }}
+
+jobs:
+  prepare-tools:
+    name: Instalar Ghidra + capstone Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Ghidra
+        id: cache-ghidra
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ghidra
+          key: ghidra-${{ env.GHIDRA_VERSION }}-${{ runner.os }}
+
+      - name: Descargar Ghidra (si no está cacheado)
+        if: steps.cache-ghidra.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/ghidra
+          ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_20260921.zip"
+          URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${ZIP}"
+          echo "Descargando ${URL}"
+          curl -fL --retry 3 -o ~/.cache/ghidra/${ZIP} "${URL}"
+          cd ~/.cache/ghidra && unzip -q "${ZIP}" && rm -f "${ZIP}"
+
+      - name: Exponer GHIDRA_HOME
+        run: |
+          GH=$(ls -d ~/.cache/ghidra/ghidra_*_PUBLIC 2>/dev/null | head -1)
+          echo "GHIDRA_HOME=${GH}" >> "$GITHUB_ENV"
+          test -x "${GH}/support/analyzeHeadless" && echo "Ghidra OK: ${GH}"
+
+      - name: Instalar capstone Python + extractores
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install capstone pyelftools
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full 7zip 2>/dev/null || true
+
+      - name: Verificar toolchain
+        run: |
+          python3 -c "import capstone; print('capstone', capstone.__version__)"
+          "${GHIDRA_HOME}/support/analyzeHeadless" -help 2>&1 | head -5 || true
+
+  fetch-iso:
+    name: Descargar ISO Xbox (cacheada)
+    runs-on: ubuntu-latest
+    needs: prepare-tools
+    if: ${{ github.event.inputs.modo != 'tools-only' && github.event.inputs.modo != 'analyze-only' }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolver URL de ISO
+        id: resolve
+        shell: bash
+        run: |
+          URL="${{ github.event.inputs.iso_url }}"
+          if [ -z "$URL" ]; then URL="${ISO_URL_SECRET:-}"; fi
+          if [ -z "$URL" ]; then URL="${{ secrets.ISO_URL }}"; fi
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          if [ -z "$URL" ]; then
+            echo "::warning::No se proporcionó ISO_URL; se usará caché si existe."
+          fi
+        env:
+          ISO_URL_SECRET: ${{ secrets.ISO_URL }}
+
+      - name: Cache de ISO
+        id: cache-iso
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/defjam-iso
+          key: defjam-iso-${{ hashFiles('**/iso.sha256') }}-${{ github.event.inputs.iso_sha256 }}
+          restore-keys: |
+            defjam-iso-
+
+      - name: Descargar ISO si no está cacheada
+        if: steps.resolve.outputs.url != ''
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/defjam-iso
+          URL="${{ steps.resolve.outputs.url }}"
+          BASE=$(basename "${URL%%\?*}")
+          OUT=~/.cache/defjam-iso/${BASE}
+          if [ ! -f "$OUT" ]; then
+            echo "Descargando ISO: $URL"
+            curl -fL --retry 3 --retry-delay 5 -o "$OUT" "$URL"
+          else
+            echo "ISO ya cacheada: $OUT"
+          fi
+          if [ -n "${{ github.event.inputs.iso_sha256 }}" ]; then
+            echo "${{ github.event.inputs.iso_sha256 }}  $OUT" | sha256sum -c -
+          fi
+          echo "ISO_PATH=$OUT" >> "$GITHUB_ENV"
+
+      - name: Extraer .xbe de la ISO/XISO
+        run: |
+          set -euo pipefail
+          mkdir -p work/iso-extract
+          ISO=$(ls ~/.cache/defjam-iso/* 2>/dev/null | head -1)
+          echo "ISO encontrada: $ISO"
+          if [ -z "$ISO" ]; then
+            echo "No hay ISO en caché; saltando extracción."
+            exit 0
+          fi
+          # Intento 1: 7z
+          7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+          # Buscar .xbe
+          XBE=$(find work/iso-extract -iname "*.xbe" | head -1)
+          if [ -z "$XBE" ]; then
+            echo "No se encontró .xbe con 7z; intentando extract-xiso si existe."
+            if command -v extract-xiso >/dev/null; then
+              extract-xiso -x work/iso-extract "$ISO" || true
+              XBE=$(find work/iso-extract -iname "*.xbe" | head -1)
+            fi
+          fi
+          if [ -n "$XBE" ]; then
+            echo "XBE_PATH=$XBE" >> "$GITHUB_ENV"
+            echo "XBE encontrado: $XBE"
+            ls -lh "$XBE"
+          else
+            echo "::warning::No se pudo extraer .xbe. Revisa formato ISO/XISO."
+          fi
+
+      - name: Subir artefacto .xbe
+        if: env.XBE_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: defjam-xbe
+          path: ${{ env.XBE_PATH }}
+          if-no-files-found: warn
+
+  analyze:
+    name: Analizar .xbe (capstone + Ghidra)
+    runs-on: ubuntu-latest
+    needs: [prepare-tools, fetch-iso]
+    if: ${{ github.event.inputs.modo != 'tools-only' && github.event.inputs.modo != 'iso-only' }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Restaurar Ghidra cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ghidra
+          key: ghidra-${{ env.GHIDRA_VERSION }}-${{ runner.os }}
+
+      - name: Restaurar ISO cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/defjam-iso
+          key: defjam-iso-restore
+          restore-keys: |
+            defjam-iso-
+
+      - name: Descargar artefacto .xbe (si existe)
+        uses: actions/download-artifact@v4
+        with:
+          name: defjam-xbe
+          path: work/xbe
+        continue-on-error: true
+
+      - name: Localizar .xbe
+        id: xbe
+        run: |
+          XBE=$(find work -iname "*.xbe" 2>/dev/null | head -1)
+          if [ -z "$XBE" ]; then XBE=$(ls ~/.cache/defjam-iso/*.xbe 2>/dev/null | head -1); fi
+          echo "path=${XBE}" >> "$GITHUB_OUTPUT"
+          echo "XBE=${XBE}"
+
+      - name: Análisis con capstone
+        if: steps.xbe.outputs.path != ''
+        run: |
+          set -euo pipefail
+          mkdir -p work/capstone-out
+          python3 scripts/ci/extract_xbe_capstone.py "${{ steps.xbe.outputs.path }}" work/capstone-out
+          echo "=== preview ==="
+          head -40 work/capstone-out/disasm.txt
+
+      - name: Análisis con Ghidra headless
+        if: steps.xbe.outputs.path != ''
+        run: |
+          set -euo pipefail
+          GH=$(ls -d ~/.cache/ghidra/ghidra_*_PUBLIC 2>/dev/null | head -1)
+          export GHIDRA_HOME="$GH"
+          mkdir -p work/ghidra-project work/ghidra-out
+          XBE="${{ steps.xbe.outputs.path }}"
+          "$GH/support/analyzeHeadless" work/ghidra-project DefJam \
+            -import "$XBE" \
+            -processor "x86:LE:32:default" \
+            -postScript scripts/ghidra/export_decompiled.py work/ghidra-out \
+            -deleteProject 2>&1 | tail -40 || true
+          echo "Archivos generados:"
+          ls -la work/ghidra-out | head
+
+      - name: Subir resultados de análisis
+        uses: actions/upload-artifact@v4
+        with:
+          name: defjam-analysis
+          path: |
+            work/capstone-out/**
+            work/ghidra-out/**
+          if-no-files-found: warn
