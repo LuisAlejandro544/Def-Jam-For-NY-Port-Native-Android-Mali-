@@ -336,7 +336,14 @@ jobs:
                           if not filename:
                               filename = os.path.basename(urllib.parse.urlparse(dl_url).path) or f"archivo_{idx}"
                           if not os.path.splitext(filename)[1]:
-                              filename += ".rar"
+                              if data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+                                  filename += ".zip"
+                              elif data[:6] == b"Rar!\x1a\x07":
+                                  filename += ".rar"
+                              elif data[:6] == b"7z\xbc\xaf\x27\x1c":
+                                  filename += ".7z"
+                              else:
+                                  filename += ".rar"
                           safe_name = re.sub(r'[^A-Za-z0-9._-]', "_", filename)
                           local_path = f".opencode/attachments/archivo_{idx}_{safe_name}"
                           with open(local_path, "wb") as f:

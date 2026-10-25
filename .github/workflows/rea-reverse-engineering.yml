@@ -155,10 +155,16 @@ jobs:
             echo "No hay ISO en caché; saltando extracción."
             exit 0
           fi
-          # Descompresión: soporta ISO/XISO y también archivos RAR (mediafire)
+          # Descompresión: soporta ISO/XISO y también archivos RAR/ZIP (mediafire)
           if [[ "${ISO,,}" == *.rar ]]; then
             if command -v unrar >/dev/null 2>&1; then
               unrar x -o+ "$ISO" work/iso-extract/ 2>&1 | tail -20 || 7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+            else
+              7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
+            fi
+          elif [[ "${ISO,,}" == *.zip ]]; then
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -o "$ISO" -d work/iso-extract 2>&1 | tail -20 || 7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
             else
               7z x -y "$ISO" -owork/iso-extract 2>&1 | tail -20 || true
             fi
@@ -171,6 +177,8 @@ jobs:
             mkdir -p "$dir"
             if [[ "${nested,,}" == *.rar ]]; then
               if command -v unrar >/dev/null 2>&1; then unrar x -o+ "$nested" "$dir/" || 7z x -y "$nested" "-o$dir"; else 7z x -y "$nested" "-o$dir"; fi
+            elif [[ "${nested,,}" == *.zip ]]; then
+              if command -v unzip >/dev/null 2>&1; then unzip -o "$nested" -d "$dir" || 7z x -y "$nested" "-o$dir"; else 7z x -y "$nested" "-o$dir"; fi
             else
               7z x -y "$nested" "-o$dir" || true
             fi
